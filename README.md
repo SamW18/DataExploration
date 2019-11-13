@@ -1,3 +1,4 @@
 # DataExploration
-Sample Code for Data Exploration
+
+Personal Projects in Data Analysis by Sam Woo  
 
