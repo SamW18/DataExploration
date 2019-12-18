@@ -1,0 +1,220 @@
+---
+title: "Final Project"
+author: "Yinyu Ji, Emily Lu, Sam Woo, Valerie Zhang"
+date: "12/6/2019"
+output:
+  html_document:
+    df_print: paged
+---
+
+## Data Wrangling
+```{r}
+set.seed(139)
+
+# read in data
+airbnb=read.csv("~/Downloads/139-project/AB_NYC_2019.csv")
+names = read.csv("~/Downloads/139-project/firstnames.csv")
+
+# rename airbnb$host_name to firstname to match names df
+airbnb$host_name <- toupper(airbnb$host_name)
+names(airbnb)[names(airbnb) == "host_name"] <- "firstname"
+
+# merge 2 datasets by firstname
+# this drops any firstnames that are not in both dfs
+merged = merge(airbnb, names, by="firstname")
+
+# create race indicators based on threshold of 75%
+ethnicity = rep(2, nrow(merged))
+for(i in 1:nrow(merged)) {
+  ethnicity[i] = which.max(merged[i, 18:23])
+}
+hisIndices = which(ethnicity == 1)
+whiteIndices = which(ethnicity == 2)
+
+ethnicity[hisIndices] = 2
+ethnicity[whiteIndices] = 1
+
+merged$ethnicity = ethnicity
+merged$ethnicity =factor(merged$ethnicity, levels = c(1, 2, 3, 4, 5, 6),labels =c("White", "Hispanic", "Black", "API", "AIAN", "2 Race"))
+
+boxplot(merged$price ~ merged$ethnicity, las=2, main = "Price")
+boxplot(merged$reviews_per_month ~ merged$ethnicity, las=2, main = "Reviews Per Month")
+
+# create a df for only predictors under consideration
+newmerged = merged
+newmerged$name <- NULL
+newmerged$host_id <- NULL
+newmerged$isWhite <- NULL
+newmerged$isBlack <- NULL
+newmerged$isHispanic <- NULL
+newmerged$id <- NULL
+newmerged$last_review <- NULL
+newmerged$X <- NULL
+newmerged$latitude <- NULL
+newmerged$longitude <- NULL
+newmerged$firstname <- NULL
+newmerged$number_of_reviews <- NULL
+newmerged$obs <- NULL
+newmerged$pcthispanic <- NULL
+newmerged$pctwhite <- NULL
+newmerged$pctblack <- NULL
+newmerged$pctapi <- NULL
+newmerged$pct2prace <- NULL
+newmerged$pctaian <- NULL
+newmerged$reviews_per_month <- NULL
+
+# try taking out neighbourhood (optional)
+newmerged$neighbourhood <- NULL
+
+# log response, reviews_per_month, due to skew
+newmerged$log_rpm = log(merged$reviews_per_month)
+
+# impute 0 where log is not finite
+newmerged$log_rpm[!is.finite(newmerged$log_rpm)] <- 0
+
+# view df
+newmerged
+
+# 80-20 train-test split
+totalObs = nrow(newmerged)
+ntrain = floor(0.8* totalObs)
+train.indices = sample(totalObs, ntrain)
+train = newmerged[train.indices, ] #train set
+test = newmerged[-train.indices, ] #test set
+
+#RMSE
+RMSE = function(y,yhat){
+  SSE =sum((y-yhat)^2)
+  return(sqrt(SSE/length(y)))
+}
+```
+
+## Simple Linear Regression and Stepwise Regression
+```{r}
+#assumption checking for baseline 
+lm1 = lm(log(reviews_per_month+1) ~ ethnicity, data = merged)
+summary(lm1)
+plot(lm1)
+hist(merged$price)
+hist(log(merged$price))
+hist(merged$reviews_per_month)
+hist(sqrt(merged$reviews_per_month))
+hist(log(merged$reviews_per_month+1))
+
+
+#variable selection to determine potential confounders
+lm1 = lm(log_rpm ~ ., data = train)
+ethnicityModel = lm(log_rpm ~ 1 + ethnicity, data = train)
+backwardmodel = step(lm1, direction = "backward", scope = list(lower = formula(ethnicityModel)), trace = 0)
+formula(backwardmodel)
+lm2 = lm(formula(backwardmodel), data = train)
+summary(lm2)
+formula(lm2)
+
+lm3 = lm(log_rpm ~.-ethnicity, data = train)
+summary(lm3)
+
+lm4 <-step(lm3, direction = "backward", k = 2, trace = FALSE)
+summary(lm4)
+
+lm5 <- lm(log_rpm~., data=train)
+lm6 <-step(lm5, direction = "backward", k = 2, trace = FALSE)
+
+summary(lm5)
+summary(lm6)
+
+#calculate RMSE's
+yhat.train = predict(lm5,train);yhat.test = predict(lm5,test)
+RMSE(train$log_rpm, yhat.train);RMSE(test$log_rpm, yhat.test)
+
+yhat.train = predict(lm6,train);yhat.test = predict(lm6,test)
+RMSE(train$log_rpm, yhat.train);RMSE(test$log_rpm, yhat.test)
+```
+
+
+## Regularization
+
+```{r}
+library(glmnet)
+## Fit full model 
+model = lm(log_rpm ~ ., 
+   data = train)
+
+## Prepare matrix of full model for glmnet function
+X = model.matrix(model)[,-1]
+
+## Regularize the full model (lasso/ridge)
+lasso = cv.glmnet(X, train$log_rpm, alpha =1) 
+ridge = cv.glmnet(X, train$log_rpm, alpha = 0)
+coef(lasso)
+coef(ridge)
+
+## Prepare matrix of full model for glmnet function (on test set)
+X_test = model.matrix(model, data = test)[,-1]
+## Get rmse of the lasso/ridge on test set 
+lasso_train_test = cbind(RMSE(train$log_rpm, predict(lasso,X)), RMSE(test$log_rpm, predict(lasso, X_test)))
+ridge_train_test = cbind(RMSE(train$log_rpm, predict(ridge,X)), RMSE(test$log_rpm, predict(ridge, X_test))) 
+regularized = rbind(lasso_train_test, ridge_train_test)
+colnames(regularized) = c('train','test')
+rownames(regularized) = c('lasso', 'ridge')
+regularized
+
+```
+
+
+## Decision Trees and Random Forest
+
+```{r}
+#install.packages(c("rpart", "rpart.plot","caret","randomForest"))
+library(rpart);library(rpart.plot);library(caret);library(randomForest)
+
+tree=rpart(log_rpm~.,data=train,control=list(maxdepth = 20))
+
+yhat.train = predict(tree,train)
+yhat.test = predict(tree,test)
+RMSE(train$log_rpm, yhat.train)
+RMSE(test$log_rpm, yhat.test)
+
+
+rf = randomForest(log_rpm~.,data=train, mtry = 7,maxnodes=50)
+
+yhat.train = predict(rf,train)
+yhat.test = predict(rf,test)
+RMSE(train$log_rpm, yhat.train)
+RMSE(test$log_rpm, yhat.test)
+```
+
+## Mixed Effects
+
+```{r}
+#will take out neighborhood for this part.
+#install.packages("lme4")
+library(lme4)
+
+#seeing whether ethnicity is signficant with lmer
+lmer2 = lmer(log_rpm~1 + ethnicity + (1 + minimum_nights + calculated_host_listings_count + availability_365 + ethnicity|neighbourhood_group),  data=train, control = lmerControl(optimizer ="Nelder_Mead"))
+summary(lmer2)
+
+#baseline model for lmer
+lmer4 = lmer(log_rpm~1  + (1 + minimum_nights + calculated_host_listings_count + availability_365 + ethnicity|neighbourhood_group),  data=train, control = lmerControl(optimizer ="Nelder_Mead"))
+
+anova(lmer2, lmer4)
+
+#predicting rmse for train
+whiteTrain = as.numeric(train$ethnicity == "White")
+blackTrain = as.numeric(train$ethnicity == "Black")
+apiTrain = as.numeric(train$ethnicity == "API")
+Xtrain = cbind(1, whiteTrain, blackTrain, apiTrain)
+y.train = Xtrain %*% summary(lmer2)$coef[,1]
+RMSE(y.train, train$log_rpm)
+
+#predicting rmse for test
+isWhite = as.numeric(test$ethnicity == "White")
+isBlack = as.numeric(test$ethnicity == "Black")
+isAPI = as.numeric(test$ethnicity == "API")
+X = cbind(1, isWhite, isBlack, isAPI)
+y.hat = X %*% summary(lmer2)$coef[,1]
+RMSE(y.hat, test$log_rpm)
+```
+
+
